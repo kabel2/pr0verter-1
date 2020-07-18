@@ -26,7 +26,7 @@ class VideoStream
      *           */
     private function open()
     {
-        if (! ($this->stream = fopen($this->path, 'rb'))) {
+        if (file_exists($this->path) && ! ($this->stream = fopen($this->path, 'rb'))) {
             die('Could not open stream for reading');
         }
     }
@@ -36,6 +36,7 @@ class VideoStream
      *           */
     private function setHeader()
     {
+        if(!file_exists($this->path)) return;
         ob_get_clean();
         header('Content-Type: video/mp4');
         header('Cache-Control: max-age=2592000, public');
@@ -87,6 +88,7 @@ class VideoStream
      *           */
     private function end()
     {
+        if(!file_exists($this->path)) return;
         fclose($this->stream);
         exit;
     }
@@ -96,6 +98,7 @@ class VideoStream
      *           */
     private function stream()
     {
+        if(!file_exists($this->path)) return;
         $i = $this->start;
         set_time_limit(0);
         while (! feof($this->stream) && $i <= $this->end) {
