@@ -86,6 +86,8 @@ class ConvertVideo implements ShouldQueue
      */
     private $end;
 
+    private $maxBitrate;
+
     /**
      * Create a new job instance.
      *
@@ -110,14 +112,14 @@ class ConvertVideo implements ShouldQueue
 
         $this->params = [
             'ffmpeg.binaries' => env('FFMPEG_BIN', '/usr/local/bin/ffmpeg'),
-            'ffmpeg.threads' => env('FFMPEG_THREADS', 12),
+            'ffmpeg.threads' => env('FFMPEG_THREADS', 4),
             'ffprobe.binaries' => env('FFMPEG_PROBE_BIN', '/usr/local/bin/ffprobe'),
             'timeout' => env('FFMPEG_TIMEOUT', 3600), ];
 
         $this->filters = [
             '-profile:v', 'main',
             '-level', '4.0',
-            '-preset', 'medium',
+            '-preset', 'fast',
             '-fs', $this->limit * 8192 .'k',
             '-movflags', '+faststart',
         ];
@@ -129,13 +131,13 @@ class ConvertVideo implements ShouldQueue
      * converts video
      * short description of parameters
      * -t: set max video length
-     * -profile:v baseline -level 3.0: pr0gramm only supports baseline lv 3.0
+     * -profile:v baseline -level 4.0: pr0gramm only supports main lv 4.0
      * -preset: sets conversion speed
      * -fs: ffmpeg cuts on this size
      *
      * @return void
      */
-    public function handle()
+    public function handle($guessMaxBitrate = false)
     {
         $ffprobe = FFProbe::create($this->params);
         $ffmpeg = FFMpeg::create($this->params);
@@ -152,6 +154,11 @@ class ConvertVideo implements ShouldQueue
 
         $this->px = $ffprobe->streams($this->loc.'/'.$this->name)->videos()->first()->getDimensions()->getWidth();
         $this->py = $ffprobe->streams($this->loc.'/'.$this->name)->videos()->first()->getDimensions()->getHeight();
+
+        if($this->duration == 0 || $this->px == 0) {
+            failed();
+            return;
+        }
 
         $video = $ffmpeg->open($this->loc.'/'.$this->name);
 
@@ -191,7 +198,7 @@ class ConvertVideo implements ShouldQueue
                 $this->filters[] = '-an';
                 break;
             case 1:
-                $format->setAudioKiloBitrate(60); // test value
+                $format->setAudioKiloBitrate(70); // test value
                 break;
             case 2:
                 $format->setAudioKiloBitrate(120);
@@ -201,76 +208,126 @@ class ConvertVideo implements ShouldQueue
                 break;
         }
 
-        $format->setAdditionalParameters($this->filters);
-        $format->setPasses(2);
-        $format->setKiloBitrate($this->getBitrate($format->getAudioKiloBitrate()));
+        if(!$guessMaxBitrate) {
+            $this->setMaxBitrate();
+        }
 
-        $format->on('progress', function ($video, $format, $percentage) {
-            DB::table('data')->where('guid', $this->name)->update(['progress' => $percentage]);
-        });
+        $addParams = $this->filters;
+        if($guessMaxBitrate) {
+            array_push($addParams, '-crf', '28');
+            $format->setAudioKiloBitrate(96); // test value
+        }
+        $format->setAdditionalParameters($addParams);
 
-        if ($video->save($format, $this->loc.'/public/'.$this->name.'.mp4')) {
-            DB::table('data')->where('guid', $this->name)->update(['progress' => 100]);
+        if(!$guessMaxBitrate) {
+            $format->setPasses(2);
+            $taa = $this->getBitrate($format->getAudioKiloBitrate(), $this->maxBitrate);
+            $format->setKiloBitrate($taa);
+        }
+
+
+        if($guessMaxBitrate) {
+            $format->on('progress', function ($video, $format, $percentage) {
+                DB::table('data')->where('guid', $this->name)->update(['progress' => $percentage*0.5]);
+            });
+        } else {
+            $format->on('progress', function ($video, $format, $percentage) {
+                DB::table('data')->where('guid', $this->name)->update(['progress' => ($percentage*0.5)+50]);
+            });
+        }
+
+        $basePath = $this->loc.'/public/'.$this->name;
+
+        if($guessMaxBitrate) {
+            $basePath = $basePath.'prerun';
+        }
+        $status = false;
+        try {
+            $status = $video->save($format, $basePath.'.mp4');
+            if(!$guessMaxBitrate) {
+                DB::table('data')->where('guid', $this->name)->update(['progress' => 100]);
+            }
+        } catch(\Exception $e) {
+            error_log("failed2");
+            $this->failed();
+            return;
+        }
+
+        if ($status) {
+            $this->maxBitrate = $ffprobe->streams($this->loc.'/'.$this->name)->videos()->first()->get('bit_rate'); // there are videos which have no bit_rate information
+
+            if($this->maxBitrate == 0) {
+
+                $commands = array($this->loc.'/'.$this->name, '-select_streams', 'v' ,'-show_entries', 'packet=size:stream=duration' ,'-of', 'compact=p=0:nk=1'); // this is not how to do this...
+
+                $b = explode("\n",$ffprobe->getFFProbeDriver()->command($commands));
+                array_pop($b);
+                $popped2 = array_pop($b);
+
+                $a = array_sum($b);
+
+                $this->maxBitrate = $a / (float)$popped2;
+            }
+
+        } else {
+            error_log("failed");
+            $this->failed();
         }
     }
 
-    private function getBitrate($audioBitrate)
+    // pr0gramm converts video with crf 28, preset medium
+    // we should be under this bitrate to prevent pr0gramm converting it again (at crf 28)
+    private function setMaxBitrate() {
+        $this->handle(true);
+    }
+
+    private function getBitrate($audioBitrate, $maxBitrate)
     {
         $this->duration = min($this->duration, $this->maxDuration);
 
         $bitrate = ($this->limit * 8000) / (float) $this->duration;
+
+        if($bitrate > $maxBitrate) return $maxBitrate;
 
         !$this->sound ? : $bitrate -= $audioBitrate;
 
         return $bitrate;
     }
 
+    /*
+     * 0-50 seconds max 1024p
+     * 50-120 seconds max 720p
+     * 120-300 seconds max 480p
+    */
     private function getAutoResolution()
     {
-        if ($this->duration > 30 && $this->duration < 60 && $this->px >= 480) {
-            if ($this->px * (16 / 9) === $this->py) {
-                $this->px = 576;
-                $this->py = 1024;
-            } else {
-                if ($this->px > 480 && $this->py < 720) {
-                    $this->px /= 1.5;
-                    $this->py /= 1.5;
-                } elseif ($this->px > 720) {
-                    $this->px /= 2;
-                    $this->py /= 2;
-                }
-            }
+        $longest_side = max($this->px, $this->py);
+        $duration = $this->duration;
+        $ratio = $this->px / $this->py;
+
+        $new_size = $longest_side;
+
+        if($longest_side > 1052) {
+            $new_size = 1052;
         }
-        if ($this->duration > 60 && $this->duration < 110 && $this->px > 480) {
-            if ($this->px * (16 / 9) === $this->py) {
-                $this->px = 480;
-                $this->py = 854;
-            } else {
-                if ($this->px > 480 && $this->py < 720) {
-                    $this->px /= 1.6; // WARNGING: Test Values
-                    $this->py /= 1.6; //
-                } elseif ($this->px > 720) {
-                    $this->px /= 2.1; //
-                    $this->py /= 2.1; //
-                }
-            }
+
+        if($duration > 50 && $duration < 150 && $longest_side > 720) {
+            $new_size = 720;
         }
-        if ($this->duration > 110 && $this->px > 480) {
-            if ($this->px * (16 / 9) === $this->py) {
-                $this->px = 432;
-                $this->py = 768;
-            } else {
-                if ($this->px > 480 && $this->py < 720) {
-                    $this->px /= 1.9; // test
-                    $this->py /= 1.9; //
-                } elseif ($this->px > 720) {
-                    $this->px /= 2.5; //
-                    $this->py /= 2.5; //
-                }
-            }
+
+        if($duration > 150 && $longest_side > 480) {
+            $new_size = 480;
         }
-        $this->px = round($this->px);
-        $this->py = round($this->py);
+
+        $new_size = round($new_size);
+
+        if($this->px > $this->py) {
+            $this->px = $new_size;
+            $this->py = $new_size / $ratio;
+        } else {
+            $this->py = $new_size;
+            $this->px = $new_size * $ratio;
+        }
 
         // resolution has to be even
         if ($this->px % 2 != 0) {
