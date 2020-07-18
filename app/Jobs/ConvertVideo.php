@@ -114,13 +114,13 @@ class ConvertVideo implements ShouldQueue
             'ffmpeg.binaries' => env('FFMPEG_BIN', '/usr/local/bin/ffmpeg'),
             'ffmpeg.threads' => env('FFMPEG_THREADS', 4),
             'ffprobe.binaries' => env('FFMPEG_PROBE_BIN', '/usr/local/bin/ffprobe'),
-            'timeout' => env('FFMPEG_TIMEOUT', 3600), ];
+            'timeout' => env('FFMPEG_TIMEOUT', 3600),];
 
         $this->filters = [
             '-profile:v', 'main',
             '-level', '4.0',
             '-preset', 'fast',
-            '-fs', $this->limit * 8192 .'k',
+            '-fs', $this->limit * 8192 . 'k',
             '-movflags', '+faststart',
         ];
     }
@@ -149,20 +149,20 @@ class ConvertVideo implements ShouldQueue
             $this->filters[] = '-pix_fmt';
             $this->filters[] = 'yuv420p';
         } else {
-            $this->duration = (float) $ffprobe->format($this->loc.'/'.$this->name)->get('duration');
+            $this->duration = (float)$ffprobe->format($this->loc . '/' . $this->name)->get('duration');
         }
 
-        $this->px = $ffprobe->streams($this->loc.'/'.$this->name)->videos()->first()->getDimensions()->getWidth();
-        $this->py = $ffprobe->streams($this->loc.'/'.$this->name)->videos()->first()->getDimensions()->getHeight();
+        $this->px = $ffprobe->streams($this->loc . '/' . $this->name)->videos()->first()->getDimensions()->getWidth();
+        $this->py = $ffprobe->streams($this->loc . '/' . $this->name)->videos()->first()->getDimensions()->getHeight();
 
-        if($this->duration == 0 || $this->px == 0) {
+        if ($this->duration == 0 || $this->px == 0) {
             failed();
             return;
         }
 
-        $video = $ffmpeg->open($this->loc.'/'.$this->name);
+        $video = $ffmpeg->open($this->loc . '/' . $this->name);
 
-        if (! $this->res) {
+        if (!$this->res) {
             $this->getAutoResolution();
             $video->filters()->resize(new Dimension($this->px, $this->py));
         }
@@ -183,7 +183,7 @@ class ConvertVideo implements ShouldQueue
             $this->duration = $this->end - $this->start;
         }
 
-        if (! $this->start && ! $this->end) {
+        if (!$this->start && !$this->end) {
             $video->filters()->clip(TimeCode::fromSeconds($this->start), TimeCode::fromSeconds($this->maxDuration));
         }
 
@@ -208,59 +208,60 @@ class ConvertVideo implements ShouldQueue
                 break;
         }
 
-        if(!$guessMaxBitrate) {
+        if (!$guessMaxBitrate) {
             $this->setMaxBitrate();
         }
 
         $addParams = $this->filters;
-        if($guessMaxBitrate) {
-            array_push($addParams, '-crf', '28');
+        if ($guessMaxBitrate) {
+            array_push($addParams, '-crf', '27');
             $format->setAudioKiloBitrate(96); // test value
         }
         $format->setAdditionalParameters($addParams);
 
-        if(!$guessMaxBitrate) {
+        if (!$guessMaxBitrate) {
             $format->setPasses(2);
             $taa = $this->getBitrate($format->getAudioKiloBitrate(), $this->maxBitrate);
             $format->setKiloBitrate($taa);
         }
 
-
-        if($guessMaxBitrate) {
+        if ($guessMaxBitrate) {
             $format->on('progress', function ($video, $format, $percentage) {
-                DB::table('data')->where('guid', $this->name)->update(['progress' => $percentage*0.5]);
+                DB::table('data')->where('guid', $this->name)->update(['progress' => $percentage * 0.5]);
             });
         } else {
             $format->on('progress', function ($video, $format, $percentage) {
-                DB::table('data')->where('guid', $this->name)->update(['progress' => ($percentage*0.5)+50]);
+                DB::table('data')->where('guid', $this->name)->update(['progress' => ($percentage * 0.5) + 50]);
             });
         }
 
-        $basePath = $this->loc.'/public/'.$this->name;
+        $basePath = $this->loc . '/public/' . $this->name;
 
-        if($guessMaxBitrate) {
-            $basePath = $basePath.'prerun';
+        if ($guessMaxBitrate) {
+            $basePath = $basePath . '.prerun';
         }
         $status = false;
         try {
-            $status = $video->save($format, $basePath.'.mp4');
-            if(!$guessMaxBitrate) {
+            $status = $video->save($format, $basePath . '.mp4');
+            if (!$guessMaxBitrate) {
                 DB::table('data')->where('guid', $this->name)->update(['progress' => 100]);
             }
-        } catch(\Exception $e) {
-            error_log("failed2");
+        } catch (\Exception $e) {
+            error_log($e);
             $this->failed();
             return;
         }
 
-        if ($status) {
-            $this->maxBitrate = $ffprobe->streams($this->loc.'/'.$this->name)->videos()->first()->get('bit_rate'); // there are videos which have no bit_rate information
+        if ($status && $guessMaxBitrate) {
+            $this->maxBitrate = $ffprobe->streams($this->loc . '/public/' . $this->name . '.prerun' . '.mp4')->videos()->first()->get('bit_rate'); // there are videos which have no bit_rate information
+            if($this->maxBitrate != 0) {
+                $this->maxBitrate /= 1024;
+            }
+            if ($this->maxBitrate == 0) {
 
-            if($this->maxBitrate == 0) {
+                $commands = array($this->loc . '/' . $this->name, '-select_streams', 'v', '-show_entries', 'packet=size:stream=duration', '-of', 'compact=p=0:nk=1'); // this is not how to do this...
 
-                $commands = array($this->loc.'/'.$this->name, '-select_streams', 'v' ,'-show_entries', 'packet=size:stream=duration' ,'-of', 'compact=p=0:nk=1'); // this is not how to do this...
-
-                $b = explode("\n",$ffprobe->getFFProbeDriver()->command($commands));
+                $b = explode("\n", $ffprobe->getFFProbeDriver()->command($commands));
                 array_pop($b);
                 $popped2 = array_pop($b);
 
@@ -269,15 +270,18 @@ class ConvertVideo implements ShouldQueue
                 $this->maxBitrate = $a / (float)$popped2;
             }
 
-        } else {
+        }
+        if (!$status) {
             error_log("failed");
             $this->failed();
         }
+
     }
 
     // pr0gramm converts video with crf 28, preset medium
     // we should be under this bitrate to prevent pr0gramm converting it again (at crf 28)
-    private function setMaxBitrate() {
+    private function setMaxBitrate()
+    {
         $this->handle(true);
     }
 
@@ -285,11 +289,13 @@ class ConvertVideo implements ShouldQueue
     {
         $this->duration = min($this->duration, $this->maxDuration);
 
-        $bitrate = ($this->limit * 8000) / (float) $this->duration;
+        $bitrate = ($this->limit * 8000) / (float)$this->duration;
 
-        if($bitrate > $maxBitrate) return $maxBitrate;
+        if ($bitrate > $maxBitrate) {
+            return $maxBitrate;
+        }
 
-        !$this->sound ? : $bitrate -= $audioBitrate;
+        !$this->sound ?: $bitrate -= $audioBitrate;
 
         return $bitrate;
     }
@@ -307,21 +313,21 @@ class ConvertVideo implements ShouldQueue
 
         $new_size = $longest_side;
 
-        if($longest_side > 1052) {
+        if ($longest_side > 1052) {
             $new_size = 1052;
         }
 
-        if($duration > 50 && $duration < 150 && $longest_side > 720) {
+        if ($duration > 50 && $duration < 150 && $longest_side > 720) {
             $new_size = 720;
         }
 
-        if($duration > 150 && $longest_side > 480) {
+        if ($duration > 150 && $longest_side > 480) {
             $new_size = 480;
         }
 
         $new_size = round($new_size);
 
-        if($this->px > $this->py) {
+        if ($this->px > $this->py) {
             $this->px = $new_size;
             $this->py = $new_size / $ratio;
         } else {
@@ -341,13 +347,13 @@ class ConvertVideo implements ShouldQueue
     private function getGIFDuration()
     {
         $gif_graphic_control_extension = '/21f904[0-9a-f]{2}([0-9a-f]{4})[0-9a-f]{2}00/';
-        $file = file_get_contents($this->loc.'/'.$this->name);
+        $file = file_get_contents($this->loc . '/' . $this->name);
         $file = bin2hex($file);
 
         $total_delay = 0;
         preg_match_all($gif_graphic_control_extension, $file, $matches);
         foreach ($matches[1] as $match) {
-            $delay = hexdec(substr($match, -2).substr($match, 0, 2));
+            $delay = hexdec(substr($match, -2) . substr($match, 0, 2));
             if ($delay == 0) {
                 $delay = 1;
             }

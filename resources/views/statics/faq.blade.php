@@ -16,5 +16,13 @@
                 Zurzeit werden die Formate: .webm, .mp4, .mkv, .mov, .avi, .wmv, .flv, .3gp Supportet!
             </div>
         </div>
+        <div class="panel panel-default">
+            <div class="panel-heading">
+                2.) Weshalb ist mein Video viel kleiner als die angegebene Größe?
+            </div>
+            <div class="panel-body">
+                Das Video wird bei einer zu hohen Bitrate vom pr0gramm nochmals konvertiert.
+            </div>
+        </div>
     </div>
 @endsection
